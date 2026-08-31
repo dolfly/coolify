@@ -2280,9 +2280,9 @@ class ApplicationDeploymentJob implements ShouldBeEncrypted, ShouldQueue
             $fqdn = $this->preview->fqdn;
         }
         if (isset($fqdn)) {
-            $url = Url::fromString($fqdn);
-            $fqdn = $url->getHost();
-            $url = $url->withHost($fqdn)->withPort(null)->__toString();
+            $domains = str($fqdn)->explode(',')->map(fn (string $domain) => trim($domain))->filter();
+            $url = $domains->map(fn (string $domain) => Url::fromString($domain)->withPort(null)->__toString())->implode(',');
+            $fqdn = $domains->map(fn (string $domain) => Url::fromString($domain)->getHost())->implode(',');
             if ((int) $this->application->compose_parsing_version >= 3) {
                 $this->coolify_variables .= 'COOLIFY_URL='.escapeShellValue($url).' ';
                 $this->coolify_variables .= 'COOLIFY_FQDN='.escapeShellValue($fqdn).' ';
@@ -4972,11 +4972,21 @@ COPY ./nginx.conf /etc/nginx/conf.d/default.conf");
         // Reset restart count after successful deployment
         // This is done here (not in Livewire) to avoid race conditions
         // with GetContainersStatus reading old container restart counts
-        $this->application->update([
+        $restartState = [
             'restart_count' => 0,
             'last_restart_at' => null,
             'last_restart_type' => null,
-        ]);
+        ];
+
+        if ($this->pull_request_id === 0) {
+            $restartState['restart_limit_reached'] = false;
+        }
+
+        if ($this->pull_request_id === 0) {
+            $this->application->update($restartState);
+        } else {
+            $this->preview?->resetRestartLimit();
+        }
 
         try {
             $this->application->markDeploymentConfigurationApplied($this->application_deployment_queue);
