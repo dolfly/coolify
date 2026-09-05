@@ -111,6 +111,33 @@ it('does not add a single-label hostname as an application domain', function () 
     expect($this->application->fresh()->fqdn)->toBeNull();
 });
 
+it('keeps a compose domain removed when the service declares a magic URL variable', function () {
+    $this->application->update([
+        'build_pack' => 'dockercompose',
+        'docker_compose_raw' => <<<'YAML'
+services:
+  web:
+    image: nginx:alpine
+    environment:
+      SERVICE_URL_WEB: /api
+YAML,
+        'docker_compose_domains' => json_encode([
+            'web' => ['domain' => 'https://web.example.com/api'],
+        ]),
+    ]);
+
+    $component = Livewire::test(Domains::class, ['application' => $this->application->fresh()]);
+    $domainKey = hash('sha256', 'https://web.example.com/api|web');
+
+    $component
+        ->call('removeDomainByKey', $domainKey)
+        ->assertDispatched('success')
+        ->assertSet('domainRows', []);
+
+    expect(json_decode($this->application->fresh()->docker_compose_domains, true))
+        ->toMatchArray(['web' => ['domain' => null]]);
+});
+
 it('generates a preview domain when the application has no domain', function () {
     $preview = ApplicationPreview::create([
         'application_id' => $this->application->id,
@@ -687,6 +714,63 @@ it('lists dns entries for domains that still need dns and omits working configur
     expect($names)
         ->toContain('api.example.com')
         ->not->toContain('app.example.com');
+});
+
+it('does not use instance network addresses for dns entries on a remote server', function () {
+    InstanceSettings::get()->update([
+        'public_ipv4' => '198.51.100.20',
+        'public_ipv6' => '2001:db8::20',
+    ]);
+    $this->application->update(['fqdn' => 'https://app.example.com']);
+
+    $component = Livewire::test(Domains::class, ['application' => $this->application->fresh()]);
+    $records = $component->instance()->dnsRecordHints();
+
+    expect($records)->toBe([
+        [
+            'type' => 'A',
+            'name' => 'app.example.com',
+            'value' => '203.0.113.10',
+        ],
+    ]);
+});
+
+it('uses instance network addresses for dns entries on the localhost server', function () {
+    InstanceSettings::get()->update([
+        'public_ipv4' => '198.51.100.20',
+        'public_ipv6' => '2001:db8::20',
+    ]);
+    $localhost = Server::factory()->create([
+        'id' => 0,
+        'team_id' => $this->team->id,
+        'private_key_id' => $this->server->private_key_id,
+        'ip' => 'localhost',
+    ]);
+    $destination = StandaloneDocker::withoutEvents(fn () => StandaloneDocker::forceCreate([
+        'uuid' => (string) Str::uuid(),
+        'name' => 'localhost-docker',
+        'network' => 'coolify-localhost',
+        'server_id' => $localhost->id,
+    ]));
+    $this->application->update([
+        'destination_id' => $destination->id,
+        'fqdn' => 'https://app.example.com',
+    ]);
+
+    $component = Livewire::test(Domains::class, ['application' => $this->application->fresh()]);
+
+    expect($component->instance()->dnsRecordHints())->toBe([
+        [
+            'type' => 'A',
+            'name' => 'app.example.com',
+            'value' => '198.51.100.20',
+        ],
+        [
+            'type' => 'AAAA',
+            'name' => 'app.example.com',
+            'value' => '2001:db8::20',
+        ],
+    ]);
 });
 
 it('shows cloudflare domain connect only on cloud with a key', function () {
@@ -2064,6 +2148,28 @@ it('updates search engine indexing from the domains view', function () {
 
     expect($this->application->refresh()->noindexDomains()->all())
         ->toBe(['https://staging.example.com']);
+});
+
+it('updates search engine indexing for a git docker compose domain', function () {
+    $this->application->update([
+        'build_pack' => 'dockercompose',
+        'fqdn' => null,
+        'docker_compose_domains' => json_encode([
+            'web' => ['domain' => 'https://compose.example.com'],
+        ]),
+    ]);
+
+    $component = Livewire::test(Domains::class, ['application' => $this->application->fresh()])
+        ->call('toggleNoindexDomain', 'https://compose.example.com', 'noindex')
+        ->assertDispatched('configurationChanged')
+        ->assertDispatched('success');
+
+    expect($this->application->refresh()->noindexDomains()->all())
+        ->toBe(['https://compose.example.com']);
+
+    $component->call('toggleNoindexDomain', 'https://compose.example.com', 'index');
+
+    expect($this->application->refresh()->noindexDomains()->all())->toBe([]);
 });
 
 it('keeps noindex domains when normalizing a custom domain port', function () {
